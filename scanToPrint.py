@@ -1,9 +1,10 @@
 import tkinter as tk
 import psycopg2
 from config import config
-import pyperclip
+from queryGoogleSheets import QueryOverview_cColumn
 import pandas as pd
 import socket
+from os import path
 class dbOps:
     def __init__(self,ini_section):
         self.connectToDB(ini_section)
@@ -43,12 +44,35 @@ class GUI(dbOps):
         self.tableName = kwargs['table']
         self.zebraIP = kwargs['zebraIP']
         self.root = tk.Tk()
-        self.root.geometry("500x100")
+        self.root.geometry("500x150")
         self.root.title('Sales Process Appendage')
         self.CreateFields()
+        self.UpdateOrgs(QueryOverview_cColumn())
         self.pallet.insert(0,self.GetLastPalletNumber())
         self.Start()
+    def UpdateOrgs(self,sheetYield):
+        sql1 = \
+        """
+        SELECT org_name
+        FROM orgs;
+        """
+        self.cur.execute(sql1)
+        inAlready=[]
+        for item in self.cur.fetchall():
+            inAlready.append(item[0])
+        newOrgs = set(sheetYield) - set(inAlready)
+        sql2 = \
+        """
+        INSERT INTO orgs(org_name)
+        VALUES(%s);
+        """
+        for org in newOrgs:
+            self.cur.execute(sql2,(org,))
+        self.conn.commit()
     def CreateFields(self):
+        self.dest = tk.StringVar()
+        self.dest.set('select a value:')
+        self.destDropdown = tk.OptionMenu(self.root,self.dest,*QueryOverview_cColumn())
         self.palletLabel = tk.Label(text="Pallet ID #")
         self.pidLabel = tk.Label(text="PID")
         self.catLabel = tk.Label(text="Category")
@@ -72,46 +96,83 @@ class GUI(dbOps):
             bg="blue",
             fg="yellow",
         )
+        self.exportCSV = tk.Button(
+            text="Export CSV for Dest",
+            width=15,
+            height=2,
+            bg="blue",
+            fg="yellow",
+        )
         self.insertAndPrint.bind('<Button-1>', self.InsertAndPrint)
         self.justInsert.bind('<Button-1>', self.JustInsert)
-        self.root.bind('<Return>',self.insertAndPrint)
+        self.exportCSV.bind('<Button-1>', self.ExportCSV)
+        self.root.bind('<Return>',self.InsertAndPrint)
+        self.destDropdown.grid(row=0,column=0,columnspan=1)
+        self.palletLabel.grid(row=2,column=2)
+        self.pallet.grid(row=2,column=3)
+        self.pidLabel.grid(row=2,column=0)
+        self.pid.grid(row=2,column=1)
+        self.catLabel.grid(row=1,column=2)
+        self.cat.grid(row=1,column=3)
+        self.qualityLabel.grid(row=1,column=0)
+        self.quality.grid(row=1,column=1)
+        self.insertAndPrint.grid(row=3,column=0)
+        self.justInsert.grid(row=3,column=1)
+        self.exportCSV.grid(row=3,column=3)
+    def ExportCSV(self,event):
+        try:
+            sql = \
+            """
+            SELECT pid,pallet,quality,Category,org_name
+            FROM pids
+            INNER JOIN orgs ON pids.org_id = orgs.org_id
+            WHERE org_name = '{}'
+            """
+            dest = self.dest.get()
+            df = self.queryDB(sql.format(dest))
+            file = open(path.join(path.expanduser('~'),
+                'Downloads\{}.csv'.format(dest[:6])),'w')
+            df['pallets'] = 'MD ' + str(df['pallet'].values[0])
+            df.drop(columns=['pallet'])
+            file.write(df.to_csv(index=False))
+            file.close()
+        except (Exception, psycopg2.DatabaseError) as error:
+            print(error)
+        finally:
+            pass
 
-        self.palletLabel.grid(row=1,column=2)
-        self.pallet.grid(row=1,column=3)
-        self.pidLabel.grid(row=1,column=0)
-        self.pid.grid(row=1,column=1)
-        self.catLabel.grid(row=0,column=2)
-        self.cat.grid(row=0,column=3)
-        self.qualityLabel.grid(row=0,column=0)
-        self.quality.grid(row=0,column=1)
-        self.insertAndPrint.grid(row=2,column=0)
-        self.justInsert.grid(row=2,column=2)
 
     def InsertAndPrint(self,event):
         try:
             sql = \
                 """
-                INSERT INTO pids(pid,category,quality,pallet)
-                VALUES (%s,%s,%s,%s)
+                INSERT INTO pids(pid,category,quality,pallet,org_id)
+                VALUES (
+                    %s,%s,%s,%s,
+                    (SELECT org_id FROM orgs WHERE org_name = %s)
+                    )
                 RETURNING device_id;
                 """
             pallet = self.pallet.get()
             pid = self.pid.get()
             cat = self.cat.get()
             quality = self.quality.get()
+            dest = self.dest.get()
 
             self.pid.delete(0,15)
             templateFile = open('template.prn','r')
             file = open('out.prn','w')
             template = templateFile.read()
-            zpl = template.format(str(quality),str(cat),str(pid))
+            zpl = template.format(str(quality),
+                str(cat),
+                str(pid))
             self.SendToZebra(zpl)
             file.write(zpl)
             templateFile.close()
             file.close()
 
 
-            self.cur.execute(sql,(pid,cat,quality,pallet))
+            self.cur.execute(sql,(pid,cat,quality,pallet,dest))
             self.conn.commit()
         except (Exception, psycopg2.DatabaseError) as error:
             print(error)
@@ -121,18 +182,20 @@ class GUI(dbOps):
         try:
             sql = \
                 """
-                INSERT INTO pids(pid,category,quality,pallet)
-                VALUES (%s,%s,%s,%s)
+                INSERT INTO pids(pid,category,quality,pallet,org_id)
+                VALUES (
+                    %s,%s,%s,%s,(SELECT org_id FROM orgs WHERE org_name = %s))
                 RETURNING device_id;
                 """
             pallet = self.pallet.get()
             pid = self.pid.get()
             cat = self.cat.get()
             quality = self.quality.get()
+            dest = self.dest.get()
 
             self.pid.delete(0,15)
 
-            self.cur.execute(sql,(pid,cat,quality,pallet))
+            self.cur.execute(sql,(pid,cat,quality,pallet,dest))
             self.conn.commit()
         except (Exception, psycopg2.DatabaseError) as error:
             print(error)
