@@ -1,55 +1,41 @@
 import tkinter as tk
 import psycopg2
-from config import config
+from config import config,dbOps
 from queryGoogleSheets import QueryOverview_cColumn
 import pandas as pd
 import socket
-from os import path
-class dbOps:
-    def __init__(self,ini_section):
-        self.connectToDB(ini_section)
-    def connectToDB(self,ini_section):
-        try:
-            # read database configuration
-            params = config(ini_section=ini_section)
-            # connect to the PostgreSQL database
-            self.conn = psycopg2.connect(**params)
-            # create a new cursor
-            self.cur = self.conn.cursor()
-        except (Exception, psycopg2.DatabaseError) as error:
-            print(error)
-        finally:
-            return self
+from os import path,system
+from datetime import date
 
-    def queryDB(self,query):
-        return pd.io.sql.read_sql_query(query,self.conn)
-    def insertValues(self,tableName,sn,pk):
-        try:
-            sql = \
-            """
-            INSERT INTO {}(sn,pk)
-            VALUES(%s,%s)
-            RETURNING device_id;
-            """
-            self.cur.execute(sql.format(tableName), (sn,pk,))
-            self.conn.commit()
-            return self.cur.fetchone()[0]
-        except (Exception, psycopg2.DatabaseError) as error:
-            print(error)
-        finally:
-            pass
-class GUI(dbOps):
+class GUI:
     def __init__(self,**kwargs):
-        dbOps.__init__(self,kwargs['ini_section'])
+        self.connectToDB(kwargs['ini_section'])
         self.tableName = kwargs['table']
-        self.zebraIP = kwargs['zebraIP']
+        if 'zebraIP' in kwargs:
+            self.zebraIP = kwargs['zebraIP']
+        elif 'zebraName' in kwargs:
+            self.zebraName = kwargs['zebraName']
+        else:
+            print('zebra info not provided.')
         self.root = tk.Tk()
         self.root.geometry("500x150")
         self.root.title('Sales Process Appendage')
-        self.CreateFields()
         self.UpdateOrgs(QueryOverview_cColumn())
+        self.CreateFields()
         self.pallet.insert(0,self.GetLastPalletNumber())
         self.Start()
+    def GetIncompleteOrgs(self):
+        sql = \
+        """
+        SELECT org_name
+        FROM orgs
+        WHERE not complete;
+        """
+        self.cur.execute(sql)
+        incompleteOrgs = []
+        for item in self.cur.fetchall():
+            incompleteOrgs.append(item[0])
+        return incompleteOrgs
     def UpdateOrgs(self,sheetYield):
         sql1 = \
         """
@@ -60,19 +46,49 @@ class GUI(dbOps):
         inAlready=[]
         for item in self.cur.fetchall():
             inAlready.append(item[0])
-        newOrgs = set(sheetYield) - set(inAlready)
+        orgNames = []
+        orgCompletion = []
+        for item in sheetYield:
+            orgNames.append(item[0])
+            orgCompletion.append(item[1])
+
+        newOrgs = set(orgNames) - set(inAlready)
+        reducedSheetYield = []
+        for item in sheetYield:
+            if item[0] in newOrgs:
+                reducedSheetYield.append(item)
         sql2 = \
         """
-        INSERT INTO orgs(org_name)
-        VALUES(%s);
+        INSERT INTO orgs(org_name,complete)
+        VALUES(%s,%s);
         """
-        for org in newOrgs:
-            self.cur.execute(sql2,(org,))
+        for org in reducedSheetYield:
+            self.cur.execute(sql2,(org[0],org[1],))
         self.conn.commit()
+    def updateCompletionStatus(self):
+        sql = \
+        """
+        UPDATE orgs
+        Set complete = %s
+        WHERE org_name = %s;
+        """
+        try:
+            self.cur.execute(sql,(self.isChecked.get(),self.dest.get()))
+            print("updated " + str(self.cur.rowcount) + " rows.")
+            self.conn.commit()
+        except (Exception, psycopg2.DatabaseError) as error:
+            print(error)
+        finally:
+            return self
     def CreateFields(self):
+        self.isChecked = tk.BooleanVar()
+        self.checkedBox = tk.Checkbutton(text='Complete',
+                                    variable=self.isChecked,
+                                    height = 5,
+                                    width=20)
         self.dest = tk.StringVar()
         self.dest.set('select a value:')
-        self.destDropdown = tk.OptionMenu(self.root,self.dest,*QueryOverview_cColumn())
+        self.destDropdown = tk.OptionMenu(self.root,self.dest,*self.GetIncompleteOrgs())
         self.palletLabel = tk.Label(text="Pallet ID #")
         self.pidLabel = tk.Label(text="PID")
         self.catLabel = tk.Label(text="Category")
@@ -119,29 +135,40 @@ class GUI(dbOps):
         self.insertAndPrint.grid(row=3,column=0)
         self.justInsert.grid(row=3,column=1)
         self.exportCSV.grid(row=3,column=3)
+        self.checkedBox.grid(row=3,column=2)
     def ExportCSV(self,event):
         try:
             sql = \
             """
-            SELECT pid,pallet,quality,Category,org_name
+            SELECT pid
             FROM pids
             INNER JOIN orgs ON pids.org_id = orgs.org_id
             WHERE org_name = '{}'
             """
             dest = self.dest.get()
-            df = self.queryDB(sql.format(dest))
+            df = pd.read_sql_query(sql.format(dest),self.conn)
             file = open(path.join(path.expanduser('~'),
                 'Downloads\{}.csv'.format(dest[:6])),'w')
-            df['pallets'] = 'MD ' + str(df['pallet'].values[0])
-            df.drop(columns=['pallet'])
+            print(df)
             file.write(df.to_csv(index=False))
             file.close()
         except (Exception, psycopg2.DatabaseError) as error:
             print(error)
         finally:
+            self.updateCompletionStatus()
             pass
-
-
+    def connectToDB(self,ini_section):
+        try:
+            # read database configuration
+            params = config(ini_section=ini_section)
+            # connect to the PostgreSQL database
+            self.conn = psycopg2.connect(**params)
+            # create a new cursor
+            self.cur = self.conn.cursor()
+        except (Exception, psycopg2.DatabaseError) as error:
+            print(error)
+        finally:
+            return self
     def InsertAndPrint(self,event):
         try:
             sql = \
@@ -153,23 +180,29 @@ class GUI(dbOps):
                     )
                 RETURNING device_id;
                 """
-            pallet = self.pallet.get()
-            pid = self.pid.get()
-            cat = self.cat.get()
-            quality = self.quality.get()
-            dest = self.dest.get()
+            pallet = str(self.pallet.get())
+            pid = str(self.pid.get())
+            cat = str(self.cat.get())
+            quality = str(self.quality.get())
+            dest = str(self.dest.get())
 
             self.pid.delete(0,15)
-            templateFile = open('template.prn','r')
+            templateFile = open('Label.prn','r')
             file = open('out.prn','w')
             template = templateFile.read()
-            zpl = template.format(str(quality),
-                str(cat),
-                str(pid))
-            self.SendToZebra(zpl)
-            file.write(zpl)
+            dashIndex = pid.index('-')
+            zpl = template.format(pid[:dashIndex+1],
+                pid[dashIndex+1:],
+                quality,
+                cat,
+                date.today().strftime("%m/%d/%Y"))
+            if hasattr(self,'zebraIP'):
+                self.SendToZebraIP(zpl)
+            elif hasattr(self,'zebraName'):
+                file.write(zpl)
+                file.close()
+                self.SendToZebraUSB()
             templateFile.close()
-            file.close()
 
 
             self.cur.execute(sql,(pid,cat,quality,pallet,dest))
@@ -201,7 +234,7 @@ class GUI(dbOps):
             print(error)
         finally:
             pass
-    def SendToZebra(self,zpl):
+    def SendToZebraIP(self,zpl):
         mysocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
         host = self.zebraIP
         port = 9100
@@ -214,6 +247,8 @@ class GUI(dbOps):
         	print("Error with the connection at zebra IP: " + self.zebraIP )
         finally:
             pass
+    def SendToZebraUSB(self):
+        system("powershell \" Get-Content -Path .\out.prn | Out-Printer -Name '{}'\"".format(self.zebraName))
     def GetLastPalletNumber(self):
         try:
             sql = \
@@ -236,4 +271,5 @@ class GUI(dbOps):
 if __name__ == "__main__":
     gui = GUI(ini_section='local_sales_appendage',
             table='pids',
-            zebraIP="10.80.209.106")
+            zebraName='Zout')
+            #zebraIP="10.80.209.106")

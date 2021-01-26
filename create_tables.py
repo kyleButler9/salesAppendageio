@@ -8,6 +8,7 @@ def create_tables():
         """
         CREATE TABLE orgs (
             org_id SERIAL PRIMARY KEY,
+            complete Boolean,
             org_name VARCHAR(255),
             address VARCHAR(255)
         )
