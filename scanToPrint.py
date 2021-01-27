@@ -2,6 +2,7 @@ import tkinter as tk
 import psycopg2
 from config import config,dbOps
 from queryGoogleSheets import QueryOverview_cColumn
+import sqlStatements
 import pandas as pd
 import socket
 from os import path,system
@@ -36,7 +37,7 @@ class GUI:
         for item in self.cur.fetchall():
             incompleteOrgs.append(item[0])
         return incompleteOrgs
-    def UpdateOrgs(self,sheetYield):
+    def UpdateOrgsOld(self,sheetYield):
         sql1 = \
         """
         SELECT org_name
@@ -48,6 +49,7 @@ class GUI:
             inAlready.append(item[0])
         orgNames = []
         orgCompletion = []
+        print(type(sheetYield[0][1]))
         for item in sheetYield:
             orgNames.append(item[0])
             orgCompletion.append(item[1])
@@ -63,8 +65,15 @@ class GUI:
         VALUES(%s,%s);
         """
         for org in reducedSheetYield:
+
             self.cur.execute(sql2,(org[0],org[1],))
         self.conn.commit()
+    def UpdateOrgs(self,sheetYield):
+        self.cur.execute(sqlStatements.sqlTempTableCreation)
+        self.cur.executemany(sqlStatements.sqlUploadMany,sheetYield)
+        self.cur.execute(sqlStatements.sqlUpsert)
+        self.conn.commit()
+        pass
     def updateCompletionStatus(self):
         sql = \
         """
