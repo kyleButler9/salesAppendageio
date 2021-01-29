@@ -1,2 +1,3 @@
 # salesAppendageio
 zebra printer meets postgreSQL db
+ok...
